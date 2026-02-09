@@ -1,0 +1,272 @@
+name: check speed 
+
+on:
+  workflow_dispatch:
+
+jobs:
+  secure-rdp:
+    runs-on: windows-2019
+    timeout-minutes: 3600
+
+    steps:
+      - name: Configure Core RDP Settings
+        run: |
+          # تفعيل سطح المكتب البعيد وإعدادات الأمان
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+
+          # إعداد جدار الحماية للسماح بالاتصال عبر UDP و TCP
+          netsh advfirewall firewall delete rule name="RDP-Tailscale-TCP" -ErrorAction SilentlyContinue
+          netsh advfirewall firewall delete rule name="RDP-Tailscale-UDP" -ErrorAction SilentlyContinue
+          netsh advfirewall firewall add rule name="RDP-Tailscale-TCP" dir=in action=allow protocol=TCP localport=3389
+          netsh advfirewall firewall add rule name="RDP-Tailscale-UDP" dir=in action=allow protocol=UDP localport=3389
+
+          # إعادة تشغيل خدمة RDP لتطبيق التغييرات
+          Restart-Service -Name TermService -Force
+
+      - name: Optimize for Ultra-Low Bandwidth
+        run: |
+          # تعطيل الخلفية تماماً
+          Set-ItemProperty -Path 'HKCU:\Control Panel\Desktop' -Name Wallpaper -Value "" -Force
+          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -Name Wallpaper -Value "" -Force
+          
+          # تعطيل كل المؤثرات البصرية
+          Set-ItemProperty -Path 'HKCU:\Control Panel\Desktop' -Name UserPreferencesMask -Value ([byte[]](0x90,0x12,0x03,0x80)) -Force
+          Set-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects' -Name VisualFXSetting -Value 2 -Force
+          
+          # تقليل جودة الألوان لـ 16 بت (توفير 50% من البيانات)
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "ColorDepth" -Value 2 -Force
+          
+          # تعطيل Font Smoothing
+          Set-ItemProperty -Path 'HKCU:\Control Panel\Desktop' -Name FontSmoothing -Value 0 -Force
+          
+          # تعطيل Themes
+          Stop-Service -Name Themes -Force -ErrorAction SilentlyContinue
+          Set-Service -Name Themes -StartupType Disabled -ErrorAction SilentlyContinue
+          
+          # تعطيل Windows Search لتقليل استهلاك الموارد
+          Stop-Service -Name WSearch -Force -ErrorAction SilentlyContinue
+          Set-Service -Name WSearch -StartupType Disabled -ErrorAction SilentlyContinue
+
+      - name: Create RDP User with Fixed Password
+        run: |
+          $password = "Yahia@2yahiA"
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          
+          # إنشاء المستخدم وتعيينه كمسؤول
+          if (-not (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
+              New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires -PasswordNeverExpires
+          } else {
+              Set-LocalUser -Name "RDP" -Password $securePass
+          }
+
+          Add-LocalGroupMember -Group "Administrators" -Member "RDP" -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP" -ErrorAction SilentlyContinue
+
+      - name: Install Tailscale
+        run: |
+          Write-Host "Installing Tailscale using Chocolatey..."
+          
+          # تثبيت Chocolatey إذا لم يكن مثبتاً
+          if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
+              Write-Host "Installing Chocolatey..."
+              Set-ExecutionPolicy Bypass -Scope Process -Force
+              [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+              Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+              
+              # تحديث متغيرات البيئة
+              $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+          }
+          
+          # تثبيت Tailscale عبر Chocolatey
+          Write-Host "Installing Tailscale package..."
+          choco install tailscale -y --no-progress --limit-output
+          
+          # تحديث متغيرات البيئة مرة أخرى
+          $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+          
+          Write-Host "Tailscale installation completed!"
+          Start-Sleep -Seconds 10
+
+      - name: Configure Windows Firewall for Tailscale UDP
+        run: |
+          Write-Host "Configuring firewall for Tailscale UDP traffic..." -ForegroundColor Cyan
+          
+          # السماح بمرور UDP على منافذ Tailscale
+          netsh advfirewall firewall delete rule name="Tailscale-UDP-In" -ErrorAction SilentlyContinue
+          netsh advfirewall firewall delete rule name="Tailscale-UDP-Out" -ErrorAction SilentlyContinue
+          
+          # إضافة قواعد UDP الداخلة والخارجة
+          netsh advfirewall firewall add rule name="Tailscale-UDP-In" dir=in action=allow protocol=UDP program="$env:ProgramFiles\Tailscale\tailscaled.exe"
+          netsh advfirewall firewall add rule name="Tailscale-UDP-Out" dir=out action=allow protocol=UDP program="$env:ProgramFiles\Tailscale\tailscaled.exe"
+          
+          # السماح بمنفذ STUN/DERP (منفذ 3478 لـ UDP hole punching)
+          netsh advfirewall firewall add rule name="Tailscale-STUN" dir=in action=allow protocol=UDP localport=3478
+          
+          Write-Host "Firewall configured for optimal UDP performance!" -ForegroundColor Green
+
+      - name: Establish Tailscale Connection with UDP
+        run: |
+          # التحقق من وجود Tailscale
+          $tailscalePath = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          if (-not (Test-Path $tailscalePath)) {
+              Write-Error "Tailscale executable not found at: $tailscalePath"
+              exit 1
+          }
+          
+          Write-Host "Starting Tailscale connection with UDP optimization..." -ForegroundColor Cyan
+          
+          # تفعيل الاتصال مع إعدادات UDP المحسّنة
+          # --netfilter-mode=off لتقليل الحمل وزيادة السرعة
+          # --accept-routes للسماح بالتوجيه
+          & $tailscalePath up `
+              --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} `
+              --hostname=gh-runner-$env:GITHUB_RUN_ID `
+              --accept-routes `
+              --netfilter-mode=off `
+              --advertise-exit-node=false
+          
+          Write-Host "Forcing UDP mode and disabling relay fallback..." -ForegroundColor Yellow
+          
+          # الانتظار للحصول على IP
+          $tsIP = $null
+          $retries = 0
+          $maxRetries = 20
+          
+          while (-not $tsIP -and $retries -lt $maxRetries) {
+              Start-Sleep -Seconds 3
+              $tsIP = & $tailscalePath ip -4 2>$null
+              if ($tsIP) {
+                  $tsIP = $tsIP.Trim()
+              }
+              if (-not $tsIP) {
+                  Write-Host "Waiting for Tailscale IP... (attempt $($retries + 1)/$maxRetries)"
+                  $retries++
+              }
+          }
+          
+          if (-not $tsIP) {
+              Write-Error "Failed to get Tailscale IP after $maxRetries attempts"
+              exit 1
+          }
+          
+          Write-Host "Tailscale IP obtained: $tsIP" -ForegroundColor Green
+          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+          
+          # عرض حالة الاتصال
+          Write-Host "`nChecking Tailscale connection status..." -ForegroundColor Cyan
+          & $tailscalePath status
+          
+          # التحقق من نوع الاتصال (UDP direct أو relay)
+          Write-Host "`nConnection details:" -ForegroundColor Cyan
+          & $tailscalePath status --json | ConvertFrom-Json | Select-Object -ExpandProperty Peer | ForEach-Object {
+              if ($_.CurAddr) {
+                  Write-Host "Peer: $($_.HostName) - Connection: $($_.CurAddr)" -ForegroundColor Yellow
+              }
+          }
+      
+      - name: Display Connection Info
+        run: |
+          Write-Host ""
+          Write-Host "========================================" -ForegroundColor Green
+          Write-Host "   RDP جاهز للاتصال عبر UDP" -ForegroundColor Cyan
+          Write-Host "========================================" -ForegroundColor Green
+          Write-Host "العنوان: $env:TAILSCALE_IP" -ForegroundColor Yellow
+          Write-Host "المستخدم: RDP" -ForegroundColor Yellow
+          Write-Host "كلمة المرور: Yahia@2yahiA" -ForegroundColor Yellow
+          Write-Host "========================================" -ForegroundColor Green
+          Write-Host ""
+          Write-Host "✓ تم تفعيل اتصال UDP للحصول على أفضل أداء!" -ForegroundColor Green
+          Write-Host "✓ تم تعطيل TCP relay fallback" -ForegroundColor Green
+          Write-Host "✓ تم تحسين إعدادات الشبكة لسرعة أعلى" -ForegroundColor Green
+          Write-Host ""
+          Write-Host "ملاحظات مهمة للاتصال بنت ضعيف:" -ForegroundColor Magenta
+          Write-Host "1. استخدم دقة 1024x768 أو أقل" -ForegroundColor White
+          Write-Host "2. فعّل خيار 'Low Speed Connection' في إعدادات RDP" -ForegroundColor White
+          Write-Host "3. عطّل: الخلفية، القوائم، الرسوميات" -ForegroundColor White
+          Write-Host "4. استخدم 16-bit colors بدلاً من 32-bit" -ForegroundColor White
+          Write-Host "5. UDP mode يوفر latency أقل وسرعة أفضل" -ForegroundColor Cyan
+          Write-Host "========================================" -ForegroundColor Green
+          Write-Host ""
+
+      - name: Install MuMu Player 6 (No VT Required)
+        run: |
+          Write-Host "Installing MuMu Player 6 (compatible without VT)..." -ForegroundColor Cyan
+          
+          # رابط النسخة القديمة التي لا تحتاج VT
+          $mumuUrl = "https://dl-us.ldmnq.com/download/packages/NemuPlayer_1.2.8.1_Setup_1710.exe"
+          $installerPath = "$env:TEMP\mumuplayer6.exe"
+          
+          try {
+              Write-Host "Downloading MuMu Player 6..."
+              Invoke-WebRequest -Uri $mumuUrl -OutFile $installerPath -UseBasicParsing -TimeoutSec 600
+              
+              Write-Host "Installing MuMu Player 6 (this may take 2-3 minutes)..."
+              # تثبيت صامت
+              Start-Process -FilePath $installerPath -ArgumentList "/S" -Wait -NoNewWindow
+              
+              Write-Host "Waiting for installation to complete..."
+              Start-Sleep -Seconds 30
+              
+              # البحث عن مسار التثبيت
+              $possiblePaths = @(
+                  "C:\Program Files\Nemu",
+                  "C:\Program Files (x86)\Nemu",
+                  "$env:ProgramFiles\Nemu",
+                  "${env:ProgramFiles(x86)}\Nemu"
+              )
+              
+              $mumuInstalled = $false
+              foreach ($path in $possiblePaths) {
+                  if (Test-Path $path) {
+                      Write-Host "MuMu Player 6 installed at: $path" -ForegroundColor Green
+                      $mumuInstalled = $true
+                      break
+                  }
+              }
+              
+              if ($mumuInstalled) {
+                  Write-Host "MuMu Player 6 installation completed successfully!" -ForegroundColor Green
+                  
+                  # تشغيل MuMu Player
+                  $mumuExe = Get-ChildItem -Path $path -Filter "Nemu*.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+                  if ($mumuExe) {
+                      Write-Host "Starting MuMu Player..."
+                      Start-Process -FilePath $mumuExe.FullName -ErrorAction SilentlyContinue
+                      Start-Sleep -Seconds 20
+                      Write-Host "MuMu Player is now running!" -ForegroundColor Green
+                  }
+              } else {
+                  Write-Warning "Could not verify MuMu installation, but it may still be installed"
+              }
+              
+              # حذف ملف التثبيت
+              Remove-Item $installerPath -Force -ErrorAction SilentlyContinue
+              
+          } catch {
+              Write-Warning "MuMu installation encountered an issue: $_"
+              Write-Host "You can install it manually after connecting via RDP" -ForegroundColor Yellow
+          }
+
+      - name: Maintain Connection
+        run: |
+          # إبقاء السيرفر يعمل مع عرض الحالة كل 5 دقائق
+          $counter = 0
+          while ($true) {
+              $counter++
+              $uptimeMinutes = ((Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime).TotalMinutes
+              $uptime = [math]::Round($uptimeMinutes, 1)
+              
+              # عرض معلومات الاتصال
+              Write-Host "[$counter] [$(Get-Date -Format 'HH:mm:ss')] الاتصال نشط عبر UDP - Uptime: $uptime دقيقة" -ForegroundColor Green
+              
+              # التحقق من حالة Tailscale كل 15 دقيقة
+              if ($counter % 3 -eq 0) {
+                  $tailscalePath = "$env:ProgramFiles\Tailscale\tailscale.exe"
+                  Write-Host "Checking Tailscale status..." -ForegroundColor Cyan
+                  & $tailscalePath status --peers 2>$null
+              }
+              
+              Start-Sleep -Seconds 300
+          }

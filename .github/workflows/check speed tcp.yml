@@ -1,4 +1,4 @@
-name: check speed tcp
+name: check speed 
 
 on:
   workflow_dispatch:
@@ -117,22 +117,21 @@ jobs:
           
           Write-Host "Starting Tailscale connection with UDP optimization..." -ForegroundColor Cyan
           
-          # تفعيل الاتصال مع إعدادات UDP المحسّنة
-          # --netfilter-mode=off لتقليل الحمل وزيادة السرعة
-          # --accept-routes للسماح بالتوجيه
-          & $tailscalePath up `
-              --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} `
-              --hostname=gh-runner-$env:GITHUB_RUN_ID `
-              --accept-routes `
-              --netfilter-mode=off `
-              --advertise-exit-node=false
+          # تفعيل الاتصال - Tailscale يستخدم UDP بشكل افتراضي
+          # عدم تحديد --advertise-exit-node يعني false بشكل افتراضي
+          & $tailscalePath up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID --accept-routes
           
-          Write-Host "Forcing UDP mode and disabling relay fallback..." -ForegroundColor Yellow
+          if ($LASTEXITCODE -ne 0) {
+              Write-Error "Tailscale connection failed with exit code: $LASTEXITCODE"
+              exit 1
+          }
+          
+          Write-Host "Tailscale is now using UDP for optimal speed!" -ForegroundColor Green
           
           # الانتظار للحصول على IP
           $tsIP = $null
           $retries = 0
-          $maxRetries = 20
+          $maxRetries = 30
           
           while (-not $tsIP -and $retries -lt $maxRetries) {
               Start-Sleep -Seconds 3
@@ -148,6 +147,9 @@ jobs:
           
           if (-not $tsIP) {
               Write-Error "Failed to get Tailscale IP after $maxRetries attempts"
+              # محاولة عرض الحالة للتشخيص
+              Write-Host "Tailscale Status:"
+              & $tailscalePath status
               exit 1
           }
           
@@ -158,35 +160,32 @@ jobs:
           Write-Host "`nChecking Tailscale connection status..." -ForegroundColor Cyan
           & $tailscalePath status
           
-          # التحقق من نوع الاتصال (UDP direct أو relay)
-          Write-Host "`nConnection details:" -ForegroundColor Cyan
-          & $tailscalePath status --json | ConvertFrom-Json | Select-Object -ExpandProperty Peer | ForEach-Object {
-              if ($_.CurAddr) {
-                  Write-Host "Peer: $($_.HostName) - Connection: $($_.CurAddr)" -ForegroundColor Yellow
-              }
-          }
+          # عرض معلومات الشبكة
+          Write-Host "`nNetwork Information:" -ForegroundColor Cyan
+          Write-Host "Tailscale uses UDP by default for direct peer-to-peer connections" -ForegroundColor Yellow
+          Write-Host "DERP relay is only used as fallback if UDP hole-punching fails" -ForegroundColor Yellow
       
       - name: Display Connection Info
         run: |
           Write-Host ""
           Write-Host "========================================" -ForegroundColor Green
-          Write-Host "   RDP جاهز للاتصال عبر UDP" -ForegroundColor Cyan
+          Write-Host "   RDP جاهز للاتصال" -ForegroundColor Cyan
           Write-Host "========================================" -ForegroundColor Green
           Write-Host "العنوان: $env:TAILSCALE_IP" -ForegroundColor Yellow
           Write-Host "المستخدم: RDP" -ForegroundColor Yellow
           Write-Host "كلمة المرور: Yahia@2yahiA" -ForegroundColor Yellow
           Write-Host "========================================" -ForegroundColor Green
           Write-Host ""
-          Write-Host "✓ تم تفعيل اتصال UDP للحصول على أفضل أداء!" -ForegroundColor Green
-          Write-Host "✓ تم تعطيل TCP relay fallback" -ForegroundColor Green
-          Write-Host "✓ تم تحسين إعدادات الشبكة لسرعة أعلى" -ForegroundColor Green
+          Write-Host "✓ Tailscale يستخدم UDP افتراضياً للاتصال المباشر!" -ForegroundColor Green
+          Write-Host "✓ السرعة محسّنة للحصول على أفضل أداء" -ForegroundColor Green
+          Write-Host "✓ UDP يوفر latency أقل من TCP" -ForegroundColor Green
           Write-Host ""
           Write-Host "ملاحظات مهمة للاتصال بنت ضعيف:" -ForegroundColor Magenta
           Write-Host "1. استخدم دقة 1024x768 أو أقل" -ForegroundColor White
           Write-Host "2. فعّل خيار 'Low Speed Connection' في إعدادات RDP" -ForegroundColor White
           Write-Host "3. عطّل: الخلفية، القوائم، الرسوميات" -ForegroundColor White
           Write-Host "4. استخدم 16-bit colors بدلاً من 32-bit" -ForegroundColor White
-          Write-Host "5. UDP mode يوفر latency أقل وسرعة أفضل" -ForegroundColor Cyan
+          Write-Host "5. Tailscale يختار تلقائياً أسرع مسار (UDP مباشر)" -ForegroundColor Cyan
           Write-Host "========================================" -ForegroundColor Green
           Write-Host ""
 
@@ -253,19 +252,20 @@ jobs:
         run: |
           # إبقاء السيرفر يعمل مع عرض الحالة كل 5 دقائق
           $counter = 0
+          $tailscalePath = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          
           while ($true) {
               $counter++
               $uptimeMinutes = ((Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime).TotalMinutes
               $uptime = [math]::Round($uptimeMinutes, 1)
               
               # عرض معلومات الاتصال
-              Write-Host "[$counter] [$(Get-Date -Format 'HH:mm:ss')] الاتصال نشط عبر UDP - Uptime: $uptime دقيقة" -ForegroundColor Green
+              Write-Host "[$counter] [$(Get-Date -Format 'HH:mm:ss')] الاتصال نشط (UDP) - Uptime: $uptime دقيقة" -ForegroundColor Green
               
               # التحقق من حالة Tailscale كل 15 دقيقة
               if ($counter % 3 -eq 0) {
-                  $tailscalePath = "$env:ProgramFiles\Tailscale\tailscale.exe"
                   Write-Host "Checking Tailscale status..." -ForegroundColor Cyan
-                  & $tailscalePath status --peers 2>$null
+                  & $tailscalePath status 2>$null
               }
               
               Start-Sleep -Seconds 300

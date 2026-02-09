@@ -1,4 +1,4 @@
-name: check speed 
+name: super play 
 
 on:
   workflow_dispatch:

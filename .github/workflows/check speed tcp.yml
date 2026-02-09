@@ -1,4 +1,4 @@
-name: check speed 
+name: check speed tcp
 
 on:
   workflow_dispatch:
